@@ -1,0 +1,46 @@
+# hpc-guard
+
+Guard mode for agent work that touches a shared HPC cluster. While it is on, the agent
+never reaches the cluster itself: every cluster-bound command becomes a numbered,
+purpose-stating bash script staged **unexecuted** in your own tmux pane. You read it and
+press Enter. Every guarded decision — allow and deny — lands in a hash-chained audit log.
+
+Built for machines running Claude Code with `permissions.defaultMode: "auto"`, where
+nothing prompts and the blast radius is other people's jobs.
+
+## Files
+
+| file | what it is |
+|---|---|
+| `SKILL.md` | the `/hpc` skill — the protocol the agent follows |
+| `hpc-guard.sh` | the `PreToolUse` hook that enforces it |
+| `guard.conf.example` | what counts as "the cluster": remote verbs and mounted paths |
+| `test-hpc-guard.sh` | the decision table, 59 assertions |
+
+## Install
+
+Symlink this directory in as a skill, then let `/hpc on` do the rest:
+
+```bash
+ln -sfn "$PWD" ~/.claude/skills/hpc
+```
+
+In the project you want guarded, run `/hpc on`. It writes `.hpc/`, registers
+`hpc-guard.sh` as a `PreToolUse` hook in that project's `.claude/settings.json`, and
+strips `SSH_AUTH_SOCK`/`KRB5CCNAME` from the agent's shell — so a command that slips past
+the patterns still cannot authenticate. Hooks are read at startup, so it takes one session
+restart. `SKILL.md` is the full protocol.
+
+The guard is inert unless `.hpc/ON` exists. `/hpc off` prints `rm .hpc/ON` for you to run:
+an agent that can switch off its own guard has no guard.
+
+## Test
+
+```bash
+./test-hpc-guard.sh     # needs jq
+```
+
+## Used by
+
+[sortyourpaper](https://github.com/greasycat/sortyourpaper) vendors this as a submodule at
+`skills/hpc`.

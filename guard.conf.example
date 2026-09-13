@@ -1,0 +1,23 @@
+# .hpc/guard.conf — what counts as "the cluster" in this project.
+# Two verbs, both POSIX extended regex. Blank lines and # are ignored.
+#
+#   remote <ERE>   matched against the whole Bash command; a hit means the
+#                  command reaches the cluster and must be staged instead.
+#   path   <ERE>   matched against file paths and against Bash commands;
+#                  cluster-mounted storage, i.e. live cluster state.
+#
+# Reads are still allowed (cat/ls/head/tail/grep/find/...) as long as the
+# command has no redirect and no tee. Everything else gets staged.
+
+# --- scheduler and transport (edit if your site uses others) ---
+remote  (^|[;&|( ])(ssh|scp|sftp|rsync)([ ]|$)
+remote  (^|[;&|( ])(sbatch|srun|salloc|scancel|squeue|sacct|sinfo|sattach|sbcast)([ ]|$)
+
+# --- your login nodes: replace these, they are examples ---
+# remote  login[0-9]*\.hpc\.example\.edu
+# remote  (^|[;&|( ])myclustername([ ]|$)
+
+# --- cluster-mounted paths: replace these, they are examples ---
+# path  /mnt/cluster/
+# path  ^/scratch/
+# path  ^/project/
