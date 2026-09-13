@@ -51,6 +51,11 @@ let me write these files.
    for s in .claude/skills/hpc ~/.claude/skills/hpc; do
        [ -e "$s" ] && GUARD="$(readlink -f "$s")" && break
    done
+   # the hook, if install.sh linked it: a stable path that survives the repo moving
+   for h in .claude/hooks/hpc-guard.sh ~/.claude/hooks/hpc-guard.sh; do
+       [ -e "$h" ] && HOOK="$h" && break
+   done
+   HOOK="${HOOK:-$GUARD/hpc-guard.sh}"
    ```
  **Ask which login hosts and mounted paths to add** — the shipped file
    has the Slurm and ssh verbs filled in and the site-specific lines commented out.
@@ -65,7 +70,7 @@ let me write these files.
     "PreToolUse": [
       { "matcher": "Bash|Write|Edit|NotebookEdit",
         "hooks": [ { "type": "command", "timeout": 10,
-                     "command": "<$GUARD>/hpc-guard.sh" } ] }
+                     "command": "<$HOOK>" } ] }
     ]
   }
 }
