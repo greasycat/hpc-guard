@@ -49,7 +49,7 @@ let me write these files.
 
    ```bash
    for s in .claude/skills/hpc ~/.claude/skills/hpc; do
-       [ -e "$s" ] && GUARD="$(dirname "$(readlink -f "$s")")" && break
+       [ -e "$s" ] && GUARD="$(readlink -f "$s")" && break
    done
    ```
  **Ask which login hosts and mounted paths to add** — the shipped file
