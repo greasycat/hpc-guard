@@ -69,7 +69,7 @@ check "reading the log allowed"      "allow" "$(bash_call 'tail -n 20 .hpc/audit
 
 # --- staging: the action script contract ------------------------------------
 act="$t/.hpc/actions/0001-say-hello.sh"
-printf '#!/usr/bin/env bash\n# purpose: prove the loop\n# target:  local\n# effect:  prints one line\n# undo:    none — read-only\nset -euo pipefail\necho hello\n' >"$act"
+printf '#!/usr/bin/env bash\n# purpose: prove the loop\n# target:  local\n# effect:  prints one line\n# undo:    none — read-only\n# session: sessaaaa\nset -euo pipefail\necho hello\n' >"$act"
 W="tmux -L hpcguard send-keys -t hpc-x:sessaaaa"
 stage="$W 'bash .hpc/actions/0001-say-hello.sh 2>&1 | tee -a .hpc/logs/0001.log'"
 
@@ -86,6 +86,7 @@ check "new-session denied"          "deny"  "$(bash_call 'tmux -L hpcguard new-s
 check "missing script denied"        "deny"  "$(bash_call "$W 'bash .hpc/actions/0099-nope.sh'")"
 
 printf '#!/usr/bin/env bash\n# purpose: p\n# target:  local\n# effect:  e\nset -euo pipefail\n' >"$t/.hpc/actions/0002-no-undo.sh"
+printf '#!/usr/bin/env bash\n# purpose: p\n# target:  local\n# effect:  e\n# undo:    none\nset -euo pipefail\n' >"$t/.hpc/actions/0006-anon.sh"
 check "missing undo: denied"         "deny"  "$(bash_call "$W 'bash .hpc/actions/0002-no-undo.sh'")"
 
 # --- tmux verbs that run without a keypress ---------------------------------
@@ -101,8 +102,16 @@ check "capture-pane allowed"         "allow" "$(bash_call 'tmux -L hpcguard capt
 W2="tmux -L hpcguard send-keys -t hpc-x:sessbbbb"
 check "staging into another session's window denied" \
     "deny"  "$(bash_call "$W2 'bash .hpc/actions/0001-say-hello.sh'")"
+printf '#!/usr/bin/env bash\n# purpose: p\n# target:  local\n# effect:  e\n# undo:    none\n# session: sessbbbb\nset -euo pipefail\n' >"$t/.hpc/actions/0005-other-session.sh"
 check "that same window is fine for its owner" \
-    "allow" "$(bash_call "$W2 'bash .hpc/actions/0001-say-hello.sh'" sessbbbb)"
+    "allow" "$(bash_call "$W2 'bash .hpc/actions/0005-other-session.sh'" sessbbbb)"
+
+# Added 2026-09-15: the pane shows one line. A script another session wrote had
+# its body reviewed in a chat the user is not reading.
+check "staging another session's script denied" \
+    "deny"  "$(bash_call "$W 'bash .hpc/actions/0005-other-session.sh'")"
+check "an action with no session: line denied" \
+    "deny"  "$(bash_call "$W2 'bash .hpc/actions/0006-anon.sh'" sessbbbb)"
 check "staging off the guard socket denied" \
     "deny"  "$(bash_call "tmux send-keys -t hpc-x:sessaaaa 'bash .hpc/actions/0001-say-hello.sh'")"
 check "bare pane name denied"        "deny"  "$(bash_call "tmux -L hpcguard send-keys -t hpc-x 'bash .hpc/actions/0001-say-hello.sh'")"

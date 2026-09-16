@@ -16,7 +16,7 @@ nothing prompts and the blast radius is other people's jobs.
 | `hpc-guard.sh` | the `PreToolUse` hook that enforces it |
 | `hpc-pane.sh` | you run this once per project: starts the guarded tmux server |
 | `guard.conf.example` | what counts as "the cluster": remote verbs and mounted paths |
-| `test-hpc-guard.sh` | the decision table, 71 assertions |
+| `test-hpc-guard.sh` | the decision table, 73 assertions |
 
 ## Install
 

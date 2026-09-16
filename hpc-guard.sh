@@ -79,7 +79,7 @@ SOCK=hpcguard   # dedicated tmux server, started by the user, holding their cred
 # hands the name over on the way in, so the first staging attempt is the right one
 # rather than a denial that teaches it the name.
 if [[ $event == SessionStart ]]; then
-    msg=$(printf 'HPC guard mode is ON in this project.\nYour tmux window is "%s" on socket "%s" — the only pane you may stage into.\nOpen it once (it carries no command, so the guard allows it):\n  tmux -L %s new-window -d -t hpc-$(basename "$PWD") -n %s -c "$PWD"\nIf tmux reports no server, the user has not started the guarded pane yet — ask\nthem to run hpc-pane.sh from the project root.\nStage an action with:\n  tmux -L %s send-keys -t hpc-<proj>:%s '"'"'bash .hpc/actions/NNNN-<slug>.sh 2>&1 | tee -a .hpc/logs/NNNN.log'"'"'\nProtocol: SKILL.md.\n' "$sid8" "$SOCK" "$SOCK" "$sid8" "$SOCK" "$sid8")
+    msg=$(printf 'HPC guard mode is ON in this project.\nYour tmux window is "%s" on socket "%s" — the only pane you may stage into.\nOpen it once (it carries no command, so the guard allows it):\n  tmux -L %s new-window -d -t hpc-$(basename "$PWD") -n %s -c "$PWD"\nIf tmux reports no server, the user has not started the guarded pane yet — ask\nthem to run hpc-pane.sh from the project root.\nEvery action script must carry "# session: %s" in its header — I stage only what I wrote.\nStage an action with:\n  tmux -L %s send-keys -t hpc-<proj>:%s '"'"'bash .hpc/actions/NNNN-<slug>.sh 2>&1 | tee -a .hpc/logs/NNNN.log'"'"'\nProtocol: SKILL.md.\n' "$sid8" "$SOCK" "$SOCK" "$sid8" "$sid8" "$SOCK" "$sid8")
     jq -cn --arg c "$msg" '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$c}}'
     exit 0
 fi
@@ -171,6 +171,12 @@ if [[ $tool == Bash ]]; then
                 grep -qE "^#[[:space:]]*${k}:[[:space:]]*[^[:space:]]" "$script" ||
                     deny action-header "$script has no '# ${k}:' line. Every action states purpose, target, effect and undo before I ask you to approve it."
             done
+            # An action is staged by the session that wrote it and showed you its
+            # body. Without this, session A can stage B's script: the pane shows
+            # one line, and the body you would be approving was reviewed in a
+            # window you are not looking at.
+            grep -qE "^#[[:space:]]*session:[[:space:]]*${sid8}[[:space:]]*$" "$script" ||
+                deny action-authorship "$script does not carry '# session: $sid8'. An action is staged by the session that wrote it — another session's script was reviewed in a chat you are not reading. If it is mine, write the next number with that header line; if it is another session's, let that session stage it."
             allow stage "$(sha256sum "$script" | cut -d' ' -f1)"
         fi
         [[ $cmd =~ $NEWWIN_RE ]] && allow pane-new

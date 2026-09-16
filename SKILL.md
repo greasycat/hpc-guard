@@ -129,7 +129,7 @@ tmux -L hpcguard new-window -d -t "hpc-<proj>" -n <my-sid8> -c "$PWD"
 That is the only tmux mutation the guard allows me, and only in the form above — anchored,
 with no shell-command argument, since `new-window` would execute one immediately.
 
-Action numbers are shared across sessions, not partitioned: they are the project's ledger.
+Action scripts are shared too — one numbered ledger for the project, not one per session.
 Two sessions can pick `0007` at the same moment; the loser is denied on write (action
 scripts are immutable, and that includes "already exists"), re-reads `.hpc/actions/`, and
 takes the next free number. Logs are per action (`.hpc/logs/NNNN.log`), so they never
@@ -148,11 +148,15 @@ Per action, every time:
 # target:  login1.hpc.example.edu
 # effect:  submits 3 jobs to partition `short`, writes $SCRATCH/exp/abc/logs/
 # undo:    scancel <job id printed below>
+# session: <my-sid8>
 set -euo pipefail
 trap 'echo "=== action done, exit $? ==="' EXIT
 ```
 
-All four keys are required and the guard checks them — `undo:` may be `none — read-only`.
+All five keys are required and the guard checks them — `undo:` may be `none — read-only`.
+`session:` is my own window name: it is checked against the staging session, so an action is
+staged by the session that wrote it and showed you its body. Another session's script was
+reviewed in a chat you are not reading, so it stages in that session or not at all.
 Write the undo line *first*: if you cannot state how to reverse it, that is the finding, and
 it goes to the user before the script does.
 
