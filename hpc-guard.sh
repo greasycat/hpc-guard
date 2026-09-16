@@ -7,7 +7,12 @@
 #
 # Guards a mistaken agent, not an adversarial one: command-string matching is
 # defeatable by anyone trying. The control that does not rely on matching is
-# credential separation (the tmux session holds the ssh agent, this shell does not).
+# credential separation (the tmux server holds the ssh agent, this shell does not).
+#
+# Concurrent sessions: each agent session owns one tmux window, named after the
+# first 8 chars of its session_id, on the shared `hpcguard` socket. A session may
+# only stage into its own window — two agents sharing a pane would concatenate
+# their staged lines. The audit chain is one file, appended under flock.
 #
 # stdin: PreToolUse JSON. stdout: a deny decision, or nothing (= fall through).
 #
@@ -54,10 +59,30 @@ emit_deny() {
 # to "allow" under its own breakage is not a guard.
 command -v jq >/dev/null || emit_deny "HPC mode is on but jq is missing, so the guard cannot evaluate this call. Install jq, or turn the mode off yourself with: rm .hpc/ON"
 
+event=$(jq -r '.hook_event_name // empty' <<<"$input")
 tool=$(jq -r '.tool_name // empty' <<<"$input")
 sid=$(jq -r '.session_id // "?"' <<<"$input")
 cmd=$(jq -r '.tool_input.command // empty' <<<"$input")
 fp=$(jq -r '.tool_input.file_path // empty' <<<"$input")
+
+# This session's own tmux window. Everything staged must go here and nowhere
+# else: send-keys appends to a pane's current input line, so two sessions sharing
+# one pane splice their commands together. Stripped to [A-Za-z0-9] so it can be
+# interpolated into a regex without escaping.
+sid8=$(printf '%s' "$sid" | tr -cd 'A-Za-z0-9' | cut -c1-8)
+sid8=${sid8:-nosid}
+SOCK=hpcguard   # dedicated tmux server, started by the user, holding their credentials
+
+# ------------------------------------------------------------ SessionStart ---
+# A session cannot see its own id, and it needs it: the window it may stage into
+# is named after it. Registered on SessionStart as well as PreToolUse, the guard
+# hands the name over on the way in, so the first staging attempt is the right one
+# rather than a denial that teaches it the name.
+if [[ $event == SessionStart ]]; then
+    msg=$(printf 'HPC guard mode is ON in this project.\nYour tmux window is "%s" on socket "%s" — the only pane you may stage into.\nOpen it once (it carries no command, so the guard allows it):\n  tmux -L %s new-window -d -t hpc-$(basename "$PWD") -n %s -c "$PWD"\nIf tmux reports no server, the user has not started the guarded pane yet — ask\nthem to run hpc-pane.sh from the project root.\nStage an action with:\n  tmux -L %s send-keys -t hpc-<proj>:%s '"'"'bash .hpc/actions/NNNN-<slug>.sh 2>&1 | tee -a .hpc/logs/NNNN.log'"'"'\nProtocol: SKILL.md.\n' "$sid8" "$SOCK" "$SOCK" "$sid8" "$SOCK" "$sid8")
+    jq -cn --arg c "$msg" '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$c}}'
+    exit 0
+fi
 
 # ----------------------------------------------------------------- config ---
 remote_pats=() path_pats=()
@@ -79,18 +104,37 @@ GUARD_OWNED="${B}\.hpc/(ON|guard\.conf|audit\.jsonl|logs(/|$))|${B}\.claude/sett
 # ------------------------------------------------------------------ audit ---
 # Written before the decision is returned, so a crash in the decision path still
 # leaves the record.
+# Read-prev-then-append is a read-modify-write: two sessions doing it at once
+# both chain off the same predecessor and the chain breaks at that point. flock
+# serialises them. ponytail: no flock (macOS) degrades to the old race — fine for
+# one session, and --verify still names the line if it ever bites.
 audit() {  # decision rule [sha]
-    local prev=""
     mkdir -p .hpc
-    [[ -f $log ]] && prev=$(tail -n1 "$log" | sha256sum | cut -d' ' -f1)
-    jq -cn --arg ts "$(date -uIs)" --arg sid "$sid" --arg tool "$tool" \
-        --arg d "$1" --arg r "$2" --arg t "${target:-}" --arg sha "${3:-}" --arg prev "$prev" \
-        '{ts:$ts,sid:$sid,tool:$tool,decision:$d,rule:$r,target:$t,sha:$sha,prev:$prev}' >>"$log"
+    {
+        command -v flock >/dev/null && flock 9
+        local prev=""
+        [[ -s $log ]] && prev=$(tail -n1 "$log" | sha256sum | cut -d' ' -f1)
+        jq -cn --arg ts "$(date -uIs)" --arg sid "$sid" --arg tool "$tool" \
+            --arg d "$1" --arg r "$2" --arg t "${target:-}" --arg sha "${3:-}" --arg prev "$prev" \
+            '{ts:$ts,sid:$sid,tool:$tool,decision:$d,rule:$r,target:$t,sha:$sha,prev:$prev}' >>"$log"
+    } 9>>"$log"
 }
 deny()  { audit deny "$1" ""; emit_deny "$2"; }
 allow() { audit allow "$1" "${2:-}"; exit 0; }   # silent: normal permission flow continues
 
-STAGE_RE="^[[:space:]]*tmux[[:space:]]+send-keys[[:space:]]+-t[[:space:]]+[\"']?[A-Za-z0-9_.-]+[\"']?[[:space:]]+'bash[[:space:]]+\.hpc/actions/([0-9]{4}-[A-Za-z0-9._-]+\.sh)([[:space:]]+2>&1[[:space:]]+\|[[:space:]]+tee[[:space:]]+-a[[:space:]]+\.hpc/logs/[0-9]{4}\.log)?'[[:space:]]*$"
+# The pane target is pinned to this session's own window (`<session>:<sid8>`), on
+# the guard's own socket. Another session's window is as off limits as the cluster.
+PANE="[\"']?[A-Za-z0-9_.-]+:${sid8}[\"']?"
+TMUX="tmux[[:space:]]+-L[[:space:]]+${SOCK}"
+STAGE_RE="^[[:space:]]*${TMUX}[[:space:]]+send-keys[[:space:]]+-t[[:space:]]+${PANE}[[:space:]]+'bash[[:space:]]+\.hpc/actions/([0-9]{4}-[A-Za-z0-9._-]+\.sh)([[:space:]]+2>&1[[:space:]]+\|[[:space:]]+tee[[:space:]]+-a[[:space:]]+\.hpc/logs/[0-9]{4}\.log)?'[[:space:]]*$"
+
+# Opening the session's own window is the one tmux mutation that is not a keypress
+# risk — provided it carries no shell-command argument, which `new-window` would
+# execute immediately. Anchored, so nothing may follow the window name but -c <dir>.
+# The user's bootstrap sets `update-environment ""` and an after-new-window
+# pipe-pane hook on this server, so a window I open still inherits *their*
+# credentials and still logs itself.
+NEWWIN_RE="^[[:space:]]*${TMUX}[[:space:]]+new-window[[:space:]]+-d[[:space:]]+-t[[:space:]]+[\"']?[A-Za-z0-9_.-]+[\"']?[[:space:]]+-n[[:space:]]+${sid8}([[:space:]]+-c[[:space:]]+[\"']?[A-Za-z0-9_./-]+[\"']?)?[[:space:]]*$"
 
 # The one way to watch a staged action without polling the pane: block until the
 # action's own footer marker lands in its log, then stop. Whole-command anchored
@@ -120,7 +164,7 @@ if [[ $tool == Bash ]]; then
             [[ $cmd =~ (Enter|C-m|\\r|\\n|[[:space:]]-H([[:space:]]|$)) ]] &&
                 deny stage-carries-enter "Staging may not carry Enter — pressing it is your decision, not mine. Send the command text alone and I will stop and wait."
             [[ $cmd =~ $STAGE_RE ]] ||
-                deny stage-not-an-action "Only a staged action script may go to that pane, exactly as: tmux send-keys -t <pane> 'bash .hpc/actions/NNNN-<slug>.sh 2>&1 | tee -a .hpc/logs/NNNN.log'. $STAGE_HINT"
+                deny stage-not-an-action "Only a staged action script may go to your own window, exactly as: tmux -L $SOCK send-keys -t <session>:$sid8 'bash .hpc/actions/NNNN-<slug>.sh 2>&1 | tee -a .hpc/logs/NNNN.log'. Your window is named $sid8 — another session's window is off limits. $STAGE_HINT"
             script=".hpc/actions/${BASH_REMATCH[1]}"
             [[ -f $script ]] || deny stage-missing-file "$script does not exist yet — write it before staging it."
             for k in purpose target effect undo; do
@@ -129,9 +173,10 @@ if [[ $tool == Bash ]]; then
             done
             allow stage "$(sha256sum "$script" | cut -d' ' -f1)"
         fi
+        [[ $cmd =~ $NEWWIN_RE ]] && allow pane-new
         [[ $cmd =~ tmux[[:space:]]+([^[:space:]]+[[:space:]]+)*(capture-pane|list-|display-message|has-session|show-) ]] &&
             allow tmux-read
-        deny tmux-write "That tmux verb can execute in the guarded pane without you pressing anything. Only 'send-keys' of a staged action script is allowed. $STAGE_HINT"
+        deny tmux-write "That tmux verb can execute in the guarded pane without you pressing anything. Only 'send-keys' of a staged action script, and opening my own window (tmux -L $SOCK new-window -d -t <session> -n $sid8 -c <dir>), are allowed. $STAGE_HINT"
     fi
 
     # Remote verbs are checked before the guard-owned reads below, so that a
@@ -192,7 +237,7 @@ if [[ $fp == *.hpc/actions/* ]]; then
     [[ $fp == *.abort ]] &&
         deny action-aborted "$fp is a retired action. Aborted actions are kept as a record of what was proposed, not reopened — write the next number."
     [[ $tool != Write || -e $fp ]] &&
-        deny action-immutable "Action scripts are immutable once written — otherwise the body you reviewed and the body that runs can differ. Write the next number instead."
+        deny action-immutable "Action scripts are immutable once written — otherwise the body you reviewed and the body that runs can differ. Write the next number instead. (If that number appeared while you were composing, another session took it: re-read .hpc/actions/ and take the next free one.)"
     allow action-new
 fi
 

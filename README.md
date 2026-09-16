@@ -14,8 +14,9 @@ nothing prompts and the blast radius is other people's jobs.
 |---|---|
 | `SKILL.md` | the `/hpc` skill — the protocol the agent follows |
 | `hpc-guard.sh` | the `PreToolUse` hook that enforces it |
+| `hpc-pane.sh` | you run this once per project: starts the guarded tmux server |
 | `guard.conf.example` | what counts as "the cluster": remote verbs and mounted paths |
-| `test-hpc-guard.sh` | the decision table, 59 assertions |
+| `test-hpc-guard.sh` | the decision table, 71 assertions |
 
 ## Install
 
@@ -30,6 +31,14 @@ In the project you want guarded, run `/hpc on`. It writes `.hpc/`, registers
 strips `SSH_AUTH_SOCK`/`KRB5CCNAME` from the agent's shell — so a command that slips past
 the patterns still cannot authenticate. Hooks are read at startup, so it takes one session
 restart. `SKILL.md` is the full protocol.
+
+## Several agents at once
+
+`bash hpc-pane.sh` starts one tmux server per project, from *your* shell, so it holds your
+credentials. Each agent session then opens its own window in it, named after its session id,
+and may stage into that window and no other — otherwise two sessions' staged commands
+splice together on one input line. The audit chain is one file for the project, appended
+under `flock` and tagged with the session id, so parallel work stays one readable timeline.
 
 The guard is inert unless `.hpc/ON` exists. `/hpc off` prints `rm .hpc/ON` for you to run:
 an agent that can switch off its own guard has no guard.

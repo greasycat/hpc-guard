@@ -18,7 +18,7 @@ it in your pane, and stop. You read it and press Enter.**
 ```
 /hpc on          # set the project up and turn the guard on
 /hpc status      # is it on, what does it consider "the cluster", recent decisions
-/hpc start       # print the tmux bootstrap for you to run
+/hpc start       # print the one command that starts your guarded pane
 /hpc off         # prints the command — you run it, I cannot
 /hpc verify      # check the audit chain for edits or gaps
 ```
@@ -61,7 +61,9 @@ let me write these files.
    has the Slurm and ssh verbs filled in and the site-specific lines commented out.
 3. Write `.hpc/.gitignore` = `logs/`, `audit.jsonl`, `ON` — the action scripts stay tracked,
    so the ledger of what was run against the cluster lives in `git log`.
-4. Register the hook in the project's `.claude/settings.json` (create it, or merge if present):
+4. Register the hook in the project's `.claude/settings.json` (create it, or merge if present).
+   The same script serves both events — `SessionStart` is how a session learns the name of
+   the window it owns, since it cannot see its own id:
 
 ```json
 {
@@ -70,6 +72,10 @@ let me write these files.
     "PreToolUse": [
       { "matcher": "Bash|Write|Edit|NotebookEdit",
         "hooks": [ { "type": "command", "timeout": 10,
+                     "command": "<$HOOK>" } ] }
+    ],
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "timeout": 10,
                      "command": "<$HOOK>" } ] }
     ]
   }
@@ -86,16 +92,49 @@ cannot authenticate. Your tmux server, started before this, keeps the real crede
 
 ## `/hpc start` — the pane
 
-You run this, not me. The pane must inherit *your* credentials; if I created it, it would
-inherit my stripped environment and the separation would be pointless.
+You run this once per project, from the project root; I cannot. The tmux *server* must be
+born from your shell so it holds your ssh agent and Kerberos ticket — mine have been
+stripped.
 
 ```bash
-tmux new-session -s "hpc-$(basename "$PWD")"
-tmux pipe-pane -o -t "hpc-$(basename "$PWD")" "cat >> $PWD/.hpc/logs/pane.log"
+bash "$GUARD/hpc-pane.sh"     # $GUARD as resolved in step 2 above
 ```
 
-`pipe-pane` is what satisfies "everything is logged": it captures the whole pane, including
-commands you type yourself, not only the ones I stage.
+It is idempotent: it starts the server on the dedicated `hpcguard` socket if it is not
+there, otherwise it just attaches. Three settings make the rest of this work unattended:
+
+- `update-environment ""` freezes the server on the environment it was born with — yours —
+  so a window opened later by *my* tmux client still holds your credentials, not my empty
+  ones. This is why I can open my own window without breaking the separation.
+- an `after-new-window` hook pipes every window to `.hpc/logs/pane-<window>.log`, including
+  windows you open and type in yourself. That is what satisfies "everything is logged".
+- window `0` is yours and is piped to `.hpc/logs/pane-user.log`.
+
+If your ssh agent socket changes (a fresh login), the server is holding a stale one:
+`tmux -L hpcguard kill-server`, then run it again.
+
+## One window per session
+
+Several agents can work in one project at once. Each gets **its own window**, named after
+the first eight characters of its session id, and may stage into that window and no other —
+`send-keys` appends to a pane's current input line, so two sessions sharing a pane would
+splice their commands into each other.
+
+My `SessionStart` hook tells me my window name on the way in. I open it myself, once:
+
+```bash
+tmux -L hpcguard new-window -d -t "hpc-<proj>" -n <my-sid8> -c "$PWD"
+```
+
+That is the only tmux mutation the guard allows me, and only in the form above — anchored,
+with no shell-command argument, since `new-window` would execute one immediately.
+
+Action numbers are shared across sessions, not partitioned: they are the project's ledger.
+Two sessions can pick `0007` at the same moment; the loser is denied on write (action
+scripts are immutable, and that includes "already exists"), re-reads `.hpc/actions/`, and
+takes the next free number. Logs are per action (`.hpc/logs/NNNN.log`), so they never
+collide. The audit chain is one file for the whole project, appended under `flock`, with
+each entry carrying its `sid` — one timeline, and you can see which session did what.
 
 ## The staging loop
 
@@ -124,10 +163,10 @@ succeeded, failed under `set -e`, or was interrupted, so the marker means *finis
 2. **Show the whole body in chat.** The pane shows one line; the user should not have to open
    a file to know what they are approving.
 
-3. **Stage it, without Enter:**
+3. **Stage it, without Enter,** into my own window:
 
 ```bash
-tmux send-keys -t "hpc-<proj>" 'bash .hpc/actions/0007-resubmit-oom-tasks.sh 2>&1 | tee -a .hpc/logs/0007.log'
+tmux -L hpcguard send-keys -t "hpc-<proj>:<my-sid8>" 'bash .hpc/actions/0007-resubmit-oom-tasks.sh 2>&1 | tee -a .hpc/logs/0007.log'
 ```
 
 4. **Stop, and arm one watch.** Say: the command is in the pane unexecuted — read it, Enter
@@ -146,7 +185,7 @@ until grep -q '=== action done' .hpc/logs/0007.log 2>/dev/null; do sleep 5; done
    staging and then say nothing further — the user may take minutes to press Enter, and a
    watch is not a reason to nag.
 
-   Never stage a second action while one is unrun. `send-keys` appends to the pane's
+   Never stage a second action while one is unrun *in my window*. `send-keys` appends to the pane's
    current input line, so two staged commands **concatenate**: `... | tee -a
    .hpc/logs/0003.log` followed by `bash .hpc/actions/0004-x.sh` becomes `tee -a
    .hpc/logs/0003.logbash .hpc/actions/0004-x.sh`, and tee overwrites the next action
@@ -175,6 +214,7 @@ mv .hpc/actions/0004-probe-shell-route.sh .hpc/actions/0004-probe-shell-route.sh
 Direct `ssh`/`rsync`/`sbatch` and friends; writes to cluster-mounted paths; any tmux verb
 that can execute without a keypress (`run-shell`, `paste-buffer`, `respawn-pane`, …);
 `send-keys` carrying `Enter`, `C-m` or `-H`; edits to an action script that already exists;
+`send-keys` aimed at any window but my own, or at a tmux server other than `hpcguard`;
 and anything touching `.hpc/ON`, `.hpc/guard.conf`, `.hpc/audit.jsonl`, `.hpc/logs/` or
 `.claude/settings.json`.
 
@@ -205,14 +245,17 @@ rm .hpc/ON
 ## `/hpc status`
 
 Whether `.hpc/ON` exists, the `remote`/`path` lines currently in `.hpc/guard.conf`, whether a
-`hpc-<proj>` tmux session is alive, and the last ~15 audit entries. Read-only — every one of
+`hpc-<proj>` session is alive on the `hpcguard` socket and which windows (= which agent
+sessions) it holds — `tmux -L hpcguard list-windows -t hpc-<proj>` — and the last ~15 audit
+entries, whose `sid` field says which session each belongs to. Read-only — every one of
 those reads is allowed while the mode is on.
 
 ## The audit trail
 
 `.hpc/audit.jsonl`, one object per guarded call, allow *and* deny, each line carrying the
 sha256 of the line before it. `hpc-guard.sh --verify .hpc/audit.jsonl` walks the chain
-and names the first line that does not match. Staged actions log the script's own hash, so
+and names the first line that does not match. Concurrent sessions append under `flock`, so
+the chain stays intact with several agents logging at once. Staged actions log the script's own hash, so
 the log says which bytes were approved.
 
 This is tamper-**evident**, not tamper-proof: it detects an edit, it does not prevent one.
